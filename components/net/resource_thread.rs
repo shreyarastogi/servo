@@ -345,6 +345,7 @@ impl ResourceChannelManager {
                         Err(_) => warn!("Error writing hsts list to disk"),
                     }
                 }
+                self.resource_manager.exit();
                 let _ = sender.send(());
                 return false;
             },
@@ -429,7 +430,7 @@ pub struct CoreResourceManager {
     devtools_chan: Option<Sender<DevtoolsControlMsg>>,
     swmanager_chan: Option<IpcSender<CustomResponseMediator>>,
     filemanager: FileManager,
-    fetch_pool: rayon::ThreadPool,
+    thread_pool: Option<Arc<rayon::ThreadPool>>,
     certificate_path: Option<String>,
 }
 
@@ -445,14 +446,30 @@ impl CoreResourceManager {
             .num_threads(16)
             .build()
             .unwrap();
+        let pool_handle = Arc::new(pool);
         CoreResourceManager {
             user_agent: user_agent,
             devtools_chan: devtools_channel,
             swmanager_chan: None,
-            filemanager: FileManager::new(embedder_proxy),
-            fetch_pool: pool,
+            filemanager: FileManager::new(embedder_proxy, Arc::downgrade(&pool_handle)),
+            thread_pool: Some(pool_handle),
             certificate_path,
         }
+    }
+
+    pub fn exit(&mut self) {
+        // Note: this terminates the thread-pool,
+        // but it doesn't actually stop any running thread.
+        //
+        // TODO: ensure all workers thread have exited?
+        let pool = self
+            .thread_pool
+            .take()
+            .expect("CoreResourceManager doesn't have a thread-pool.");
+        drop(
+            Arc::try_unwrap(pool)
+                .expect("More than one strong ref to CoreResourceManager thread-pool."),
+        );
     }
 
     fn set_cookie_for_url(
@@ -486,7 +503,12 @@ impl CoreResourceManager {
             _ => ResourceTimingType::Resource,
         };
 
-        self.fetch_pool.spawn(move || {
+        let thread_pool = match self.thread_pool.as_ref() {
+            None => panic!("CoreResourceManager doesn't have a thread-pool."),
+            Some(thread_pool) => thread_pool,
+        };
+
+        thread_pool.spawn(move || {
             let mut request = request_builder.build();
             // XXXManishearth: Check origin against pipeline id (also ensure that the mode is allowed)
             // todo load context / mimesniff in fetch
