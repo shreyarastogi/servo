@@ -14,10 +14,16 @@ use servo_config::set_pref;
 use std::fs::File;
 use std::io::Read;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 #[test]
 fn test_filemanager() {
-    let filemanager = FileManager::new(create_embedder_proxy());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let pool_handle = Arc::new(pool);
+    let filemanager = FileManager::new(create_embedder_proxy(), Arc::downgrade(&pool_handle));
     set_pref!(dom.testing.html_input_element.select_files.enabled, true);
 
     // Try to open a dummy file "components/net/tests/test.jpeg" in tree
